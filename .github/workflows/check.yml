@@ -17,7 +17,7 @@ jobs:
 
       - name: Repolari ve Branchleri Tara
         run: |
-          REPOS=("SysAdminDoc/HushGram" "crimera/piko-newx" "SysAdminDoc/hushfeed")
+          REPOS=("SysAdminDoc/HushGram" "crimera/piko-newx" "SysAdminDoc/hushfeed" "SysAdminDoc/HushTelegram")
 
           mkdir -p data
 
