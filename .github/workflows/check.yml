@@ -2,9 +2,8 @@ name: Coklu Repo Takip Botu
 
 on:
   schedule:
-    # Her 30 dakikada bir otomatik kontrol eder
     - cron: '*/30 * * * *'
-  workflow_dispatch: # Test etmek icin elle calistirma butonu
+  workflow_dispatch:
 
 jobs:
   check-repos:
@@ -17,85 +16,57 @@ jobs:
 
       - name: Repolari Tara ve Bildir
         run: |
-          # 📌 TAKIP EDILECEK REPOLAR
           REPOS=("SysAdminDoc/HushGram" "crimera/piko-newx" "SysAdminDoc/hushfeed")
-
           mkdir -p data
 
-          # Eger elle test baslatildiysa onceki kayitlari sifirla ki mesajlar tekrar gelsin
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "Manuel tetikleme algilandi, test icin kayitlar temizleniyor..."
+            echo "Test tetiklendi, kayitlar temizleniyor..."
             rm -rf data/*
           fi
 
           for REPO in "${REPOS[@]}"; do
             SAFE_NAME=$(echo "$REPO" | tr '/' '_')
             
-            # --- 1. COMMIT KONTROL ---
+            # 1. COMMIT
             COMMIT_DATA=$(curl -s "https://api.github.com/repos/$REPO/commits?per_page=1")
             LATEST_COMMIT=$(echo "$COMMIT_DATA" | jq -r '.[0].sha // empty')
             COMMIT_MSG=$(echo "$COMMIT_DATA" | jq -r '.[0].commit.message // empty' | head -n 1)
-            
             COMMIT_FILE="data/${SAFE_NAME}_commit.txt"
             touch "$COMMIT_FILE"
 
             if [ -n "$LATEST_COMMIT" ] && [ "$LATEST_COMMIT" != "null" ] && [ "$LATEST_COMMIT" != "$(cat $COMMIT_FILE)" ]; then
               echo "$LATEST_COMMIT" > "$COMMIT_FILE"
-
-              # HTML karakter kacirma
               SAFE_MSG=$(echo "$COMMIT_MSG" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g')
 
-              read -r -d '' MSG_TEXT << EOM
-<b>Yeni Commit Var!</b>
-🚨 <b>${REPO}</b>
-
-💬 <b>Commit Mesajı:</b>
-${SAFE_MSG}
-
-🔗 <a href="https://github.com/${REPO}/commit/${LATEST_COMMIT}">Detayları Gör</a>
-EOM
+              MSG_TEXT="<b>Yeni Commit Var!</b>%0A🚨 <b>${REPO}</b>%0A%0A💬 <b>Commit Mesajı:</b>%0A${SAFE_MSG}%0A%0A🔗 <a href=\"https://github.com/${REPO}/commit/${LATEST_COMMIT}\">Detayları Gör</a>"
 
               curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
                 -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
-                --data-urlencode "text=${MSG_TEXT}" \
+                -d "text=${MSG_TEXT}" \
                 -d "parse_mode=HTML" \
                 -d "disable_web_page_preview=true"
             fi
 
-            # --- 2. RELEASE KONTROL ---
+            # 2. RELEASE
             RELEASE_DATA=$(curl -s "https://api.github.com/repos/$REPO/releases/latest")
             LATEST_RELEASE=$(echo "$RELEASE_DATA" | jq -r '.tag_name // empty')
             RELEASE_BODY=$(echo "$RELEASE_DATA" | jq -r '.body // empty')
             RELEASE_URL=$(echo "$RELEASE_DATA" | jq -r '.html_url // empty')
-            
             RELEASE_FILE="data/${SAFE_NAME}_release.txt"
             touch "$RELEASE_FILE"
 
             if [ -n "$LATEST_RELEASE" ] && [ "$LATEST_RELEASE" != "null" ] && [ "$LATEST_RELEASE" != "$(cat $RELEASE_FILE)" ]; then
               echo "$LATEST_RELEASE" > "$RELEASE_FILE"
-
-              # Body bossa varsayilan metin koy
               if [ -z "$RELEASE_BODY" ]; then
                 RELEASE_BODY="Release notu bulunmuyor."
               fi
-
-              # HTML karakter kacirma
               SAFE_BODY=$(echo "$RELEASE_BODY" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g')
 
-              read -r -d '' REL_TEXT << EOM
-🚀 <b>Yeni Sürüm (Release) Çıktı!</b>
-🎉 <b>${REPO}</b>
-🏷️ <b>Sürüm:</b> ${LATEST_RELEASE}
-
-<blockquote expandable>💬 <b>Release notları:</b>
-${SAFE_BODY}</blockquote>
-
-🔗 <a href="${RELEASE_URL:-https://github.com/${REPO}/releases}">Detayları Gör</a>
-EOM
+              REL_TEXT="🚀 <b>Yeni Sürüm (Release) Çıktı!</b>%0A🎉 <b>${REPO}</b>%0A🏷️ <b>Sürüm:</b> ${LATEST_RELEASE}%0A%0A<blockquote expandable>💬 <b>Release notları:</b>%0A${SAFE_BODY}</blockquote>%0A%0A🔗 <a href=\"${RELEASE_URL:-https://github.com/${REPO}/releases}\">Detayları Gör</a>"
 
               curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
                 -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
-                --data-urlencode "text=${REL_TEXT}" \
+                -d "text=${REL_TEXT}" \
                 -d "parse_mode=HTML" \
                 -d "disable_web_page_preview=true"
             fi
