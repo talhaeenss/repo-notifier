@@ -76,7 +76,7 @@ jobs:
 
               SAFE_BODY=$(echo "$RELEASE_BODY" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g')
 
-              REL_TEXT="🚀 <b>Yeni Sürüm (Release)</b>%0A🚨 <b>${REPO}</b>%0A🏷️ <b>Sürüm:</b> ${LATEST_RELEASE}%0A🌳 <b>Branch:</b> ${RELEASE_BRANCH}%0A%0A<blockquote expandable>💬 <b>Release notları:</b>%0A${SAFE_BODY}</blockquote>%0A%0A🔗 <a href=\"${RELEASE_URL:-https://github.com/${REPO}/releases}\">Detayları Gör</a>"
+              REL_TEXT="🚀 <b>New Release</b>%0A🚨 <b>${REPO}</b>%0A🏷️ <b>Sürüm:</b> ${LATEST_RELEASE}%0A🌳 <b>Branch:</b> ${RELEASE_BRANCH}%0A%0A<blockquote expandable>💬 <b>Release messages:</b>%0A${SAFE_BODY}</blockquote>%0A%0A🔗 <a href=\"${RELEASE_URL:-https://github.com/${REPO}/releases}\">Detayları Gör</a>"
 
               curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
                 -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
