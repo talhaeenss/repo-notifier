@@ -1,0 +1,67 @@
+name: Coklu Repo Takip Botu
+
+on:
+  schedule:
+    # Her 30 dakikada bir otomatik kontrol eder
+    - cron: '*/30 * * * *'
+  workflow_dispatch: # Test etmek için elle calistirma butonu
+
+jobs:
+  check-repos:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Repoyu Klonla
+        uses: actions/checkout@v4
+
+      - name: Repolari Tara ve Bildir
+        run: |
+          # 📌 TAKIP EDILECEK REPOLAR (Yeni eklerken "kullanici/repo" seklinde ekle):
+          REPOS=("SysAdminDoc/HushGram" "crimera/piko-newx" "SysAdminDoc/hushfeed")
+
+          mkdir -p data
+
+          for REPO in "${REPOS[@]}"; do
+            SAFE_NAME=$(echo "$REPO" | tr '/' '_')
+            
+            # 1. Commit Kontrol
+            LATEST_COMMIT=$(curl -s "https://api.github.com/repos/$REPO/commits?per_page=1" | jq -r '.[0].sha // empty')
+            COMMIT_MSG=$(curl -s "https://api.github.com/repos/$REPO/commits?per_page=1" | jq -r '.[0].commit.message // empty' | head -n 1)
+            
+            COMMIT_FILE="data/${SAFE_NAME}_commit.txt"
+            touch "$COMMIT_FILE"
+
+            if [ -n "$LATEST_COMMIT" ] && [ "$LATEST_COMMIT" != "null" ] && [ "$LATEST_COMMIT" != "$(cat $COMMIT_FILE)" ]; then
+              echo "$LATEST_COMMIT" > "$COMMIT_FILE"
+              MSG="🚨 *${REPO} Yeni Commit!*%0A%0A💬 Mesaj: $COMMIT_MSG%0A🔗 [Commite Git](https://github.com/$REPO/commit/$LATEST_COMMIT)"
+              curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+                -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
+                -d "text=$MSG" \
+                -d "parse_mode=Markdown"
+            fi
+
+            # 2. Release Kontrol
+            LATEST_RELEASE=$(curl -s "https://api.github.com/repos/$REPO/releases/latest" | jq -r '.tag_name // empty')
+            
+            RELEASE_FILE="data/${SAFE_NAME}_release.txt"
+            touch "$RELEASE_FILE"
+
+            if [ -n "$LATEST_RELEASE" ] && [ "$LATEST_RELEASE" != "null" ] && [ "$LATEST_RELEASE" != "$(cat $RELEASE_FILE)" ]; then
+              echo "$LATEST_RELEASE" > "$RELEASE_FILE"
+              REL_MSG="🎉 *${REPO} Yeni Sürüm (Release)!*%0A%0A🏷️ Sürüm: $LATEST_RELEASE%0A🔗 [Releaseleri Gor](https://github.com/$REPO/releases)"
+              curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+                -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
+                -d "text=$REL_MSG" \
+                -d "parse_mode=Markdown"
+            fi
+          done
+
+      - name: Durumu Kaydet
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/
+          git commit -m "chore: son commit/release verileri guncellendi" || exit 0
+          git push
+          
