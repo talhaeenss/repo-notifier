@@ -1,13 +1,23 @@
-name: Coklu Repo Takip Botu
+name: Github Coklu Repo Takip Botu
 
 on:
   schedule:
-    - cron: '*/30 * * * *'
+    - cron: '7,37 * * * *'
   workflow_dispatch:
+    inputs:
+      reset:
+        description: 'Kayitlari sifirla (commit bildirimi gelmez, release bildirimleri tekrar gelir)'
+        type: boolean
+        default: false
+
+concurrency:
+  group: repo-notifier
+  cancel-in-progress: false
 
 jobs:
   check-repos:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: write
     steps:
@@ -19,40 +29,62 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TG_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          EVENT_NAME: ${{ github.event_name }}
+          RESET: ${{ github.event.inputs.reset }}
         run: |
+          # Tek bir hata tum taramayi oldurmesin
+          set +e
+
           REPOS=("SysAdminDoc/HushGram" "crimera/piko-newx" "SysAdminDoc/hushfeed" "SysAdminDoc/HushTelegram")
 
           mkdir -p data
 
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "Test tetiklendi, kayıtlar temizleniyor..."
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$RESET" = "true" ]; then
+            echo "Reset istendi, kayitlar temizleniyor..."
             rm -rf data/*
           fi
 
           gh_curl() {
-            curl -s -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github.v3+json" "$1"
+            curl -sS --max-time 30 --retry 2 \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "$1"
+          }
+
+          esc() {
+            sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'
           }
 
           send_tg() {
-            local msg="$1"
-            local payload
-            payload=$(jq -n --arg chat_id "$TG_CHAT_ID" --arg text "$msg" '{
+            local payload code
+            payload=$(jq -n --arg chat_id "$TG_CHAT_ID" --arg text "$1" '{
               chat_id: $chat_id,
               text: $text,
               parse_mode: "HTML",
               disable_web_page_preview: true
             }')
-            curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+            code=$(curl -sS --max-time 30 -o /tmp/tg_resp.txt -w "%{http_code}" \
+              -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
               -H "Content-Type: application/json" \
-              -d "$payload" > /dev/null
+              -d "$payload")
+            if [ "$code" != "200" ]; then
+              echo "::warning::Telegram hatasi (HTTP $code): $(head -c 300 /tmp/tg_resp.txt)"
+              return 1
+            fi
+            return 0
           }
 
           for REPO in "${REPOS[@]}"; do
             SAFE_REPO=$(echo "$REPO" | tr '/' '_')
+            echo "=== $REPO ==="
 
             # --- 1. BRANCHLERI CEK ---
-            BRANCH_DATA=$(gh_curl "https://api.github.com/repos/$REPO/branches")
-            BRANCHES=$(echo "$BRANCH_DATA" | jq -r 'if type=="array" then .[].name else empty end')
+            BRANCH_DATA=$(gh_curl "https://api.github.com/repos/$REPO/branches?per_page=100")
+            BRANCHES=$(echo "$BRANCH_DATA" | jq -r 'if type=="array" then .[] | objects | .name // empty else empty end' 2>/dev/null)
+
+            if [ -z "$BRANCHES" ]; then
+              echo "::warning::$REPO branch listesi alinamadi: $(echo "$BRANCH_DATA" | head -c 300)"
+            fi
 
             for BRANCH in $BRANCHES; do
               SAFE_BRANCH=$(echo "$BRANCH" | tr '/' '_')
@@ -61,70 +93,95 @@ jobs:
               LAST_SAVED_SHA=$(cat "$COMMIT_FILE")
 
               COMMITS_JSON=$(gh_curl "https://api.github.com/repos/$REPO/commits?sha=${BRANCH}&per_page=15")
-              
-              if ! echo "$COMMITS_JSON" | jq -e 'type=="array"' > /dev/null 2>&1; then
+
+              if ! echo "$COMMITS_JSON" | jq -e 'type=="array" and length>0 and (.[0]|type)=="object"' > /dev/null 2>&1; then
+                echo "::warning::$REPO/$BRANCH commit listesi alinamadi: $(echo "$COMMITS_JSON" | head -c 300)"
                 continue
               fi
 
+              NEWEST_SHA=$(echo "$COMMITS_JSON" | jq -r '.[0].sha // empty')
+              echo "[$REPO/$BRANCH] kayitli=${LAST_SAVED_SHA:0:7} guncel=${NEWEST_SHA:0:7}"
+
+              # Ilk kez goruluyor: sadece kaydet, bildirim atma
               if [ -z "$LAST_SAVED_SHA" ]; then
-                NEWEST_SHA=$(echo "$COMMITS_JSON" | jq -r '.[0].sha // empty')
-                if [ -n "$NEWEST_SHA" ]; then
-                  echo "$NEWEST_SHA" > "$COMMIT_FILE"
-                fi
-              else
-                NEW_COMMITS=$(echo "$COMMITS_JSON" | jq -c --arg last "$LAST_SAVED_SHA" '
-                  (map(.sha == $last) | index(true)) as $idx |
-                  if $idx == null then . else .[0:$idx] end | reverse | .[]
-                ')
-
-                LATEST_SEEN_SHA=""
-                while IFS= read -r c; do
-                  [ -z "$c" ] && continue
-                  CSHA=$(echo "$c" | jq -r '.sha')
-                  CMSG=$(echo "$c" | jq -r '.commit.message' | head -n 1)
-                  SAFE_MSG=$(echo "$CMSG" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g')
-
-                  MSG="<b>Yeni Commit Var!</b> ⚡"$'\n'"🚨 <b>${REPO}</b>"$'\n'"🌳 <b>Branch:</b> ${BRANCH}"$'\n\n'"💬 <b>Commit Mesajı:</b>"$'\n'"${SAFE_MSG}"$'\n\n'"🔗 <a href=\"https://github.com/${REPO}/commit/${CSHA}\">Detayları Gör</a>"
-
-                  send_tg "$MSG"
-                  LATEST_SEEN_SHA="$CSHA"
-                  sleep 1
-                done <<< "$NEW_COMMITS"
-
-                if [ -n "$LATEST_SEEN_SHA" ]; then
-                  echo "$LATEST_SEEN_SHA" > "$COMMIT_FILE"
-                fi
+                echo "$NEWEST_SHA" > "$COMMIT_FILE"
+                continue
               fi
+
+              # Degisiklik yok
+              if [ "$LAST_SAVED_SHA" = "$NEWEST_SHA" ]; then
+                continue
+              fi
+
+              # Kayitli SHA listede yoksa (force push vb.) sadece en yeni commit bildirilir
+              NEW_COMMITS=$(echo "$COMMITS_JSON" | jq -c --arg last "$LAST_SAVED_SHA" '
+                (map(.sha == $last) | index(true)) as $idx |
+                (if $idx == null then .[0:1] else .[0:$idx] end) | reverse | .[]
+              ')
+
+              while IFS= read -r c; do
+                [ -z "$c" ] && continue
+                CSHA=$(echo "$c" | jq -r '.sha')
+                CMSG=$(echo "$c" | jq -r '.commit.message // ""' | head -n 1 | cut -c1-300 | esc)
+
+                MSG="<b>Yeni Commit Var!</b> ⚡"$'\n'"🚨 <b>${REPO}</b>"$'\n'"🌳 <b>Branch:</b> ${BRANCH}"$'\n\n'"💬 <b>Commit Mesajı:</b>"$'\n'"${CMSG}"$'\n\n'"🔗 <a href=\"https://github.com/${REPO}/commit/${CSHA}\">Detayları Gör</a>"
+
+                if send_tg "$MSG"; then
+                  # Her basarili bildirimden sonra kaydet
+                  echo "$CSHA" > "$COMMIT_FILE"
+                else
+                  break
+                fi
+                sleep 1
+              done <<< "$NEW_COMMITS"
             done
 
             # --- 2. RELEASE KONTROL ---
             RELEASE_DATA=$(gh_curl "https://api.github.com/repos/$REPO/releases/latest")
-            LATEST_RELEASE=$(echo "$RELEASE_DATA" | jq -r 'select(.tag_name != null) | .tag_name // empty')
-            
+            LATEST_RELEASE=$(echo "$RELEASE_DATA" | jq -r 'if type=="object" then (.tag_name // empty) else empty end' 2>/dev/null)
+
             RELEASE_FILE="data/${SAFE_REPO}_release.txt"
             touch "$RELEASE_FILE"
             LAST_SAVED_REL=$(cat "$RELEASE_FILE")
 
             if [ -n "$LATEST_RELEASE" ] && [ "$LATEST_RELEASE" != "$LAST_SAVED_REL" ]; then
-              echo "$LATEST_RELEASE" > "$RELEASE_FILE"
-              
-              RELEASE_BODY=$(echo "$RELEASE_DATA" | jq -r '.body // "Release notu bulunmuyor."')
+              RELEASE_BODY=$(echo "$RELEASE_DATA" | jq -r '.body // ""')
               RELEASE_URL=$(echo "$RELEASE_DATA" | jq -r '.html_url // empty')
               RELEASE_BRANCH=$(echo "$RELEASE_DATA" | jq -r '.target_commitish // "Belirtilmemiş"')
 
-              SAFE_BODY=$(echo "$RELEASE_BODY" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g')
+              [ -z "$RELEASE_BODY" ] && RELEASE_BODY="Release notu bulunmuyor."
               [ -z "$RELEASE_URL" ] && RELEASE_URL="https://github.com/${REPO}/releases"
 
-              REL_MSG="🚀 <b>New Release</b>"$'\n'"🚨 <b>${REPO}</b>"$'\n'"🏷️ <b>Sürüm:</b> ${LATEST_RELEASE}"$'\n'"🌳 <b>Branch:</b> ${RELEASE_BRANCH}"$'\n\n'"<blockquote expandable>💬 <b>Release Notes:</b>"$'\n'"${SAFE_BODY}</blockquote>"$'\n\n'"🔗 <a href=\"${RELEASE_URL}\">Detayları Gör</a>"
+              # Telegram 4096 karakter siniri: once kisalt, sonra escape et
+              if [ ${#RELEASE_BODY} -gt 2500 ]; then
+                RELEASE_BODY="${RELEASE_BODY:0:2500}..."
+              fi
+              SAFE_BODY=$(printf '%s' "$RELEASE_BODY" | esc)
+              SAFE_TAG=$(printf '%s' "$LATEST_RELEASE" | esc)
+              SAFE_RB=$(printf '%s' "$RELEASE_BRANCH" | esc)
 
-              send_tg "$REL_MSG"
+              REL_MSG="🚀 <b>New Release</b>"$'\n'"🚨 <b>${REPO}</b>"$'\n'"🏷️ <b>Sürüm:</b> ${SAFE_TAG}"$'\n'"🌳 <b>Branch:</b> ${SAFE_RB}"$'\n\n'"<blockquote expandable>💬 <b>Release Notes:</b>"$'\n'"${SAFE_BODY}</blockquote>"$'\n\n'"🔗 <a href=\"${RELEASE_URL}\">Detayları Gör</a>"
+
+              if send_tg "$REL_MSG"; then
+                echo "$LATEST_RELEASE" > "$RELEASE_FILE"
+              fi
             fi
           done
 
       - name: Durumu Kaydet
+        if: always()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add data/
-          git commit -m "chore: branch commit update" || exit 0
-          git push
+          if git diff --cached --quiet; then
+            echo "Degisiklik yok"
+            exit 0
+          fi
+          git commit -m "chore: state update"
+          for i in 1 2 3; do
+            git push && exit 0
+            git pull --rebase || git rebase --abort
+            sleep 3
+          done
+          exit 1
