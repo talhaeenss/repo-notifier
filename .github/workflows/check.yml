@@ -2,7 +2,6 @@ name: Coklu Repo Takip Botu
 
 on:
   schedule:
-    # Her 30 dakikada bir otomatik kontrol eder
     - cron: '*/30 * * * *'
   workflow_dispatch:
 
@@ -16,73 +15,109 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Repolari ve Branchleri Tara
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TG_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           REPOS=("SysAdminDoc/HushGram" "crimera/piko-newx" "SysAdminDoc/hushfeed" "SysAdminDoc/HushTelegram")
 
           mkdir -p data
 
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "Test tetiklendi, kayitlar temizleniyor..."
+            echo "Test tetiklendi, kayıtlar temizleniyor..."
             rm -rf data/*
           fi
+
+          gh_curl() {
+            curl -s -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github.v3+json" "$1"
+          }
+
+          send_tg() {
+            local msg="$1"
+            local payload
+            payload=$(jq -n --arg chat_id "$TG_CHAT_ID" --arg text "$msg" '{
+              chat_id: $chat_id,
+              text: $text,
+              parse_mode: "HTML",
+              disable_web_page_preview: true
+            }')
+            curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+              -H "Content-Type: application/json" \
+              -d "$payload" > /dev/null
+          }
 
           for REPO in "${REPOS[@]}"; do
             SAFE_REPO=$(echo "$REPO" | tr '/' '_')
 
-            # --- 1. REPODAKI TUM BRANCHLERI CEK ---
-            BRANCHES=$(curl -s "https://api.github.com/repos/$REPO/branches" | jq -r '.[].name // empty')
+            # --- 1. BRANCHLERI CEK ---
+            BRANCH_DATA=$(gh_curl "https://api.github.com/repos/$REPO/branches")
+            BRANCHES=$(echo "$BRANCH_DATA" | jq -r 'if type=="array" then .[].name else empty end')
 
             for BRANCH in $BRANCHES; do
               SAFE_BRANCH=$(echo "$BRANCH" | tr '/' '_')
               COMMIT_FILE="data/${SAFE_REPO}_${SAFE_BRANCH}_commit.txt"
               touch "$COMMIT_FILE"
+              LAST_SAVED_SHA=$(cat "$COMMIT_FILE")
 
-              COMMIT_DATA=$(curl -s "https://api.github.com/repos/$REPO/commits?sha=${BRANCH}&per_page=1")
-              LATEST_COMMIT=$(echo "$COMMIT_DATA" | jq -r '.[0].sha // empty')
-              COMMIT_MSG=$(echo "$COMMIT_DATA" | jq -r '.[0].commit.message // empty' | head -n 1)
+              COMMITS_JSON=$(gh_curl "https://api.github.com/repos/$REPO/commits?sha=${BRANCH}&per_page=15")
+              
+              if ! echo "$COMMITS_JSON" | jq -e 'type=="array"' > /dev/null 2>&1; then
+                continue
+              fi
 
-              if [ -n "$LATEST_COMMIT" ] && [ "$LATEST_COMMIT" != "null" ] && [ "$LATEST_COMMIT" != "$(cat $COMMIT_FILE)" ]; then
-                echo "$LATEST_COMMIT" > "$COMMIT_FILE"
-                SAFE_MSG=$(echo "$COMMIT_MSG" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g')
+              if [ -z "$LAST_SAVED_SHA" ]; then
+                NEWEST_SHA=$(echo "$COMMITS_JSON" | jq -r '.[0].sha // empty')
+                if [ -n "$NEWEST_SHA" ]; then
+                  echo "$NEWEST_SHA" > "$COMMIT_FILE"
+                fi
+              else
+                NEW_COMMITS=$(echo "$COMMITS_JSON" | jq -c --arg last "$LAST_SAVED_SHA" '
+                  (map(.sha == $last) | index(true)) as $idx |
+                  if $idx == null then . else .[0:$idx] end | reverse | .[]
+                ')
 
-                MSG_TEXT="<b>Yeni Commit Var!</b>%0A🚨 <b>${REPO}</b>%0A🌳 <b>Branch:</b> ${BRANCH}%0A%0A💬 <b>Commit Mesajı:</b>%0A${SAFE_MSG}%0A%0A🔗 <a href=\"https://github.com/${REPO}/commit/${LATEST_COMMIT}\">Detayları Gör</a>"
+                LATEST_SEEN_SHA=""
+                while IFS= read -r c; do
+                  [ -z "$c" ] && continue
+                  CSHA=$(echo "$c" | jq -r '.sha')
+                  CMSG=$(echo "$c" | jq -r '.commit.message' | head -n 1)
+                  SAFE_MSG=$(echo "$CMSG" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g')
 
-                curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
-                  -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
-                  -d "text=${MSG_TEXT}" \
-                  -d "parse_mode=HTML" \
-                  -d "disable_web_page_preview=true"
+                  MSG="<b>Yeni Commit Var!</b> ⚡"$'\n'"🚨 <b>${REPO}</b>"$'\n'"🌳 <b>Branch:</b> ${BRANCH}"$'\n\n'"💬 <b>Commit Mesajı:</b>"$'\n'"${SAFE_MSG}"$'\n\n'"🔗 <a href=\"https://github.com/${REPO}/commit/${CSHA}\">Detayları Gör</a>"
+
+                  send_tg "$MSG"
+                  LATEST_SEEN_SHA="$CSHA"
+                  sleep 1
+                done <<< "$NEW_COMMITS"
+
+                if [ -n "$LATEST_SEEN_SHA" ]; then
+                  echo "$LATEST_SEEN_SHA" > "$COMMIT_FILE"
+                fi
               fi
             done
 
             # --- 2. RELEASE KONTROL ---
-            RELEASE_DATA=$(curl -s "https://api.github.com/repos/$REPO/releases/latest")
-            LATEST_RELEASE=$(echo "$RELEASE_DATA" | jq -r '.tag_name // empty')
-            RELEASE_BODY=$(echo "$RELEASE_DATA" | jq -r '.body // empty')
-            RELEASE_URL=$(echo "$RELEASE_DATA" | jq -r '.html_url // empty')
-            RELEASE_BRANCH=$(echo "$RELEASE_DATA" | jq -r '.target_commitish // empty')
+            RELEASE_DATA=$(gh_curl "https://api.github.com/repos/$REPO/releases/latest")
+            LATEST_RELEASE=$(echo "$RELEASE_DATA" | jq -r 'select(.tag_name != null) | .tag_name // empty')
             
             RELEASE_FILE="data/${SAFE_REPO}_release.txt"
             touch "$RELEASE_FILE"
+            LAST_SAVED_REL=$(cat "$RELEASE_FILE")
 
-            if [ -n "$LATEST_RELEASE" ] && [ "$LATEST_RELEASE" != "null" ] && [ "$LATEST_RELEASE" != "$(cat $RELEASE_FILE)" ]; then
+            if [ -n "$LATEST_RELEASE" ] && [ "$LATEST_RELEASE" != "$LAST_SAVED_REL" ]; then
               echo "$LATEST_RELEASE" > "$RELEASE_FILE"
-              if [ -z "$RELEASE_BODY" ]; then
-                RELEASE_BODY="Release notu bulunmuyor."
-              fi
-              if [ -z "$RELEASE_BRANCH" ]; then
-                RELEASE_BRANCH="Belirtilmemiş"
-              fi
+              
+              RELEASE_BODY=$(echo "$RELEASE_DATA" | jq -r '.body // "Release notu bulunmuyor."')
+              RELEASE_URL=$(echo "$RELEASE_DATA" | jq -r '.html_url // empty')
+              RELEASE_BRANCH=$(echo "$RELEASE_DATA" | jq -r '.target_commitish // "Belirtilmemiş"')
 
               SAFE_BODY=$(echo "$RELEASE_BODY" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g')
+              [ -z "$RELEASE_URL" ] && RELEASE_URL="https://github.com/${REPO}/releases"
 
-              REL_TEXT="🚀 <b>New Release</b>%0A🚨 <b>${REPO}</b>%0A🏷️ <b>Sürüm:</b> ${LATEST_RELEASE}%0A🌳 <b>Branch:</b> ${RELEASE_BRANCH}%0A%0A<blockquote expandable>💬 <b>Release messages:</b>%0A${SAFE_BODY}</blockquote>%0A%0A🔗 <a href=\"${RELEASE_URL:-https://github.com/${REPO}/releases}\">Detayları Gör</a>"
+              REL_MSG="🚀 <b>New Release</b>"$'\n'"🚨 <b>${REPO}</b>"$'\n'"🏷️ <b>Sürüm:</b> ${LATEST_RELEASE}"$'\n'"🌳 <b>Branch:</b> ${RELEASE_BRANCH}"$'\n\n'"<blockquote expandable>💬 <b>Release Notes:</b>"$'\n'"${SAFE_BODY}</blockquote>"$'\n\n'"🔗 <a href=\"${RELEASE_URL}\">Detayları Gör</a>"
 
-              curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
-                -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
-                -d "text=${REL_TEXT}" \
-                -d "parse_mode=HTML" \
-                -d "disable_web_page_preview=true"
+              send_tg "$REL_MSG"
             fi
           done
 
