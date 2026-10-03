@@ -35,7 +35,7 @@ jobs:
           # Tek bir hata tum taramayi oldurmesin
           set +e
 
-          REPOS=("SysAdminDoc/HushGram" "crimera/piko-newx" "SysAdminDoc/hushfeed" "SysAdminDoc/HushTelegram")
+          REPOS=("SysAdminDoc/HushGram" "crimera/piko-newx" "SysAdminDoc/hushfeed")
 
           mkdir -p data
 
